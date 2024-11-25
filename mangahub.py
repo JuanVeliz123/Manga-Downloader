@@ -3,37 +3,41 @@ import urllib
 import json
 import os
 import zipfile
+import cloudscraper
 from pathlib import Path
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 url = 'https://mangahub.io/search?q='
 history_file_name = "DownloadHistory.json"
-
 special_characters = ['\\', '/', ':', '?', '*', '<', '>', '|', '"']
-
 
 def start():
     """Accept user input and either search for a particular title or check for updates"""
-    search_term = input('Enter the manga name or enter "U" to check for updates on previously updates series: ')
-    if search_term == "U":
-        Update()
+    search_term = input('Enter the manga name or enter the URL of the chapter: ')
+    if search_term.startswith("http"):
+        parsed_url = urlparse(search_term)
+        chapter = parsed_url.path.rstrip('/').split('/')[-1]
+        download_chapter("manual", chapter, search_term)
     else:
         MangaDownloader(search_term)
     print("Download complete!")
     start()
 
-
 class MangaDownloader:
 
     def __init__(self, search_term):
         print("Starting with the search term")
-        search_url = url + urllib.parse.quote(search_term)
+        search_url = url + urllib.parse.quote(search_term) + '&order=POPULAR&genre=all'
         self.display_manga(search_url)
 
     def display_manga(self, search_url):
         """Show the user the results of the manga search"""
+        test_res = get_soup(search_url)
+        print(test_res)
         manga_results = get_soup(search_url).find_all(class_="media-heading")
         try:
+            print('manga_results:', manga_results)
             assert manga_results, "No results found. Please try again"
         except AssertionError:
             print("No results found. Please try again")
@@ -193,21 +197,36 @@ class Update:
             chapterURL = new_chapter_list[index].find('a')['href']
             download_chapter(valid_name(name), valid_name(chapter_name), chapterURL)
 
-
 # Global Functions
 
 def download_chapter(manga_name, chapter_name, chapter_url):
     """Download each image from the chapter website"""
     print("Downloading : "+chapter_name)
-    soup = get_soup(chapter_url).find_all(class_="PB0mN")[0]['src'].rsplit('/1.', 1)
+
+    while True:
+        classes = get_soup(chapter_url).find_all(class_="PB0mN")[0]
+        try:
+            soup = classes["src"].rsplit('/1.', 1)
+            break
+        except KeyError:
+            print("error on src, retrying 3:)")
+            continue
+
     base_image_url, filetype = soup[0] + "/", soup[-1]
     folder = create_path(manga_name)
     image_names, num = [], 1
     while True:
         download_url = base_image_url + str(num) + '.'
-        response = MangaDownloader.is_this_broken(requests.get(download_url + filetype), download_url, filetype)
+        print("downloading: " + download_url + filetype)
+        response = download_link_scraped(download_url + filetype)
         if response.status_code != 200:
-            break
+            if num == 1:
+                print('first page failed, can happen, trying next:')
+                num = 2
+                continue
+            else:
+                print('no more chapters found, finishing')
+                break
         name = manga_name + " " + chapter_name + " " + str(num) + '.' + filetype
         image_names.append((str(folder.resolve()) + "/" + name))
         file = folder.joinpath(name)
@@ -215,7 +234,6 @@ def download_chapter(manga_name, chapter_name, chapter_url):
             wf.write(response.content)
         num += 1
     generate_cbz(folder, image_names, chapter_name, manga_name)
-
 
 def generate_cbz(folder, image_names, chapter_name, manga_name):
     """Compress the downloaded images into a .cbz file"""
@@ -229,7 +247,6 @@ def generate_cbz(folder, image_names, chapter_name, manga_name):
     for name in image_names:
         os.remove(name)
 
-
 def create_path(manga_name):
     """Creates the downloads folder, if neccesary"""
     try:
@@ -239,20 +256,23 @@ def create_path(manga_name):
     except NotADirectoryError:
         print(manga_name, "is an invalid file or folder name")
 
-
 def valid_name(name):
     """"Ensures there are no special characters present"""
     for character in special_characters:
         name = name.replace(character, '')
     return name
 
-
-
 def get_soup(search_url):
     """Gets the html and puts it in a parser"""
-    response = requests.get(search_url)
-    return BeautifulSoup(response.content, 'html.parser')
+    scraper = cloudscraper.create_scraper()
+    result = scraper.get(search_url).text
+    return BeautifulSoup(result, 'html.parser')
 
+def download_link_scraped(url):
+    """Will try to download a link using the cloudscraper"""
+    scraper = cloudscraper.create_scraper()
+    result = scraper.get(url)
+    return result
 
 def read_save_data():
     """Opens the download history file"""
@@ -262,7 +282,6 @@ def read_save_data():
     except FileNotFoundError:
         return {}
 
-
 def save_history(chapter, manga_name, chapter_list_url):
     data = read_save_data()
     sub_dict = {'Chapters': chapter, 'URL': chapter_list_url}
@@ -270,7 +289,6 @@ def save_history(chapter, manga_name, chapter_list_url):
     with open(history_file_name, 'w') as outfile:
         json.dump(data, outfile)
         outfile.flush()
-
 
 if __name__ == '__main__':
     print("Searching for manga on mangahub.io")
